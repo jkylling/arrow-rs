@@ -494,6 +494,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             fields: self.fields,
             limit: self.limit,
             offset: self.offset,
+            row_number_column: self.row_number_column,
         };
 
         // Ensure schema of ParquetRecordBatchStream respects projection, and does
@@ -536,6 +537,8 @@ struct ReaderFactory<T> {
     limit: Option<usize>,
 
     offset: Option<usize>,
+
+    row_number_column: Option<String>,
 }
 
 impl<T> ReaderFactory<T>
@@ -581,8 +584,12 @@ where
                     .fetch(&mut self.input, predicate_projection, selection.as_ref())
                     .await?;
 
-                let array_reader =
-                    build_array_reader(self.fields.as_deref(), predicate_projection, &row_group)?;
+                let array_reader = build_array_reader(
+                    self.fields.as_deref(),
+                    predicate_projection,
+                    &row_group,
+                    self.row_number_column.clone(),
+                )?;
 
                 selection = Some(evaluate_predicate(
                     batch_size,
@@ -632,7 +639,12 @@ where
 
         let reader = ParquetRecordBatchReader::new(
             batch_size,
-            build_array_reader(self.fields.as_deref(), &projection, &row_group)?,
+            build_array_reader(
+                self.fields.as_deref(),
+                &projection,
+                &row_group,
+                self.row_number_column.clone(),
+            )?,
             selection,
         );
 
@@ -977,6 +989,10 @@ impl RowGroups for InMemoryRowGroup<'_> {
             }
         }
     }
+
+    fn row_groups(&self) -> Box<dyn Iterator<Item = &RowGroupMetaData> + '_> {
+        Box::new(std::iter::once(self.metadata))
+    }
 }
 
 /// An in-memory column chunk
@@ -1052,6 +1068,7 @@ impl PageIterator for ColumnChunkIterator {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arrow::arrow_reader::tests::test_row_numbers_with_multiple_row_groups_helper;
     use crate::arrow::arrow_reader::{
         ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowSelector,
     };
@@ -1808,6 +1825,7 @@ mod tests {
             filter: None,
             limit: None,
             offset: None,
+            row_number_column: None,
         };
 
         let mut skip = true;
@@ -2335,5 +2353,58 @@ mod tests {
         // Panics here
         let result = reader.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_row_numbers_with_multiple_row_groups() {
+        test_row_numbers_with_multiple_row_groups_helper(
+            false,
+            |path, selection, _row_filter, batch_size| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Could not create runtime");
+                runtime.block_on(async move {
+                    let file = tokio::fs::File::open(path).await.unwrap();
+                    let reader = ParquetRecordBatchStreamBuilder::new(file)
+                        .await
+                        .unwrap()
+                        .with_row_selection(selection)
+                        .with_batch_size(batch_size)
+                        .with_row_number_column(Some("row_number".to_string()))
+                        .build()
+                        .expect("Could not create reader");
+                    let result = reader.try_collect::<Vec<_>>().await.unwrap();
+                    result
+                })
+            },
+        );
+    }
+
+    #[test]
+    fn test_row_numbers_with_multiple_row_groups_and_filter() {
+        test_row_numbers_with_multiple_row_groups_helper(
+            true,
+            |path, selection, row_filter, batch_size| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Could not create runtime");
+                runtime.block_on(async move {
+                    let file = tokio::fs::File::open(path).await.unwrap();
+                    let reader = ParquetRecordBatchStreamBuilder::new(file)
+                        .await
+                        .unwrap()
+                        .with_row_selection(selection)
+                        .with_row_filter(row_filter.expect("No row filter"))
+                        .with_batch_size(batch_size)
+                        .with_row_number_column(Some("row_number".to_string()))
+                        .build()
+                        .expect("Could not create reader");
+                    let result = reader.try_collect::<Vec<_>>().await.unwrap();
+                    result
+                })
+            },
+        );
     }
 }

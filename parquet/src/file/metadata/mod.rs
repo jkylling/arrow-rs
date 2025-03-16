@@ -519,6 +519,7 @@ pub type RowGroupMetaDataPtr = Arc<RowGroupMetaData>;
 pub struct RowGroupMetaData {
     columns: Vec<ColumnChunkMetaData>,
     num_rows: i64,
+    first_row_number: i64,
     sorting_columns: Option<Vec<SortingColumn>>,
     total_byte_size: i64,
     schema_descr: SchemaDescPtr,
@@ -557,6 +558,11 @@ impl RowGroupMetaData {
     /// Number of rows in this row group.
     pub fn num_rows(&self) -> i64 {
         self.num_rows
+    }
+
+    /// Returns the first row number in this row group.
+    pub fn first_row_number(&self) -> i64 {
+        self.first_row_number
     }
 
     /// Returns the sort ordering of the rows in this RowGroup if any
@@ -600,7 +606,11 @@ impl RowGroupMetaData {
     }
 
     /// Method to convert from Thrift.
-    pub fn from_thrift(schema_descr: SchemaDescPtr, mut rg: RowGroup) -> Result<RowGroupMetaData> {
+    pub fn from_thrift(
+        schema_descr: SchemaDescPtr,
+        mut rg: RowGroup,
+        first_row_number: i64,
+    ) -> Result<RowGroupMetaData> {
         if schema_descr.num_columns() != rg.columns.len() {
             return Err(general_err!(
                 "Column count mismatch. Schema has {} columns while Row Group has {}",
@@ -619,6 +629,7 @@ impl RowGroupMetaData {
         Ok(RowGroupMetaData {
             columns,
             num_rows,
+            first_row_number,
             sorting_columns,
             total_byte_size,
             schema_descr,
@@ -657,6 +668,7 @@ impl RowGroupMetaDataBuilder {
             schema_descr,
             file_offset: None,
             num_rows: 0,
+            first_row_number: 0,
             sorting_columns: None,
             total_byte_size: 0,
             ordinal: None,
@@ -666,6 +678,12 @@ impl RowGroupMetaDataBuilder {
     /// Sets number of rows in this row group.
     pub fn set_num_rows(mut self, value: i64) -> Self {
         self.0.num_rows = value;
+        self
+    }
+
+    /// Sets the first row number in this row group.
+    pub fn set_first_row_number(mut self, value: i64) -> Self {
+        self.0.first_row_number = value;
         self
     }
 
@@ -1601,11 +1619,12 @@ mod tests {
             .set_total_byte_size(2000)
             .set_column_metadata(columns)
             .set_ordinal(1)
+            .set_first_row_number(10)
             .build()
             .unwrap();
 
         let row_group_exp = row_group_meta.to_thrift();
-        let row_group_res = RowGroupMetaData::from_thrift(schema_descr, row_group_exp.clone())
+        let row_group_res = RowGroupMetaData::from_thrift(schema_descr, row_group_exp.clone(), 10)
             .unwrap()
             .to_thrift();
 
@@ -1687,7 +1706,7 @@ mod tests {
             .unwrap();
 
         let err =
-            RowGroupMetaData::from_thrift(schema_descr_3cols, row_group_meta_2cols.to_thrift())
+            RowGroupMetaData::from_thrift(schema_descr_3cols, row_group_meta_2cols.to_thrift(), 0)
                 .unwrap_err()
                 .to_string();
         assert_eq!(
@@ -1849,7 +1868,7 @@ mod tests {
         let parquet_meta = ParquetMetaDataBuilder::new(file_metadata.clone())
             .set_row_groups(row_group_meta_with_stats)
             .build();
-        let base_expected_size = 2312;
+        let base_expected_size = 2320;
 
         assert_eq!(parquet_meta.memory_size(), base_expected_size);
 
@@ -1876,7 +1895,7 @@ mod tests {
             ]]))
             .build();
 
-        let bigger_expected_size = 2816;
+        let bigger_expected_size = 2824;
         // more set fields means more memory usage
         assert!(bigger_expected_size > base_expected_size);
         assert_eq!(parquet_meta.memory_size(), bigger_expected_size);
